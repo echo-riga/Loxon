@@ -14,7 +14,7 @@ import {
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { apiFetch } from "../../../lib/api";
-
+import { RefreshControl } from "react-native";
 type User = { id: number; name: string; role: string; status: string };
 type Team = { id: number; name: string };
 
@@ -45,86 +45,112 @@ export default function TeamDetailScreen() {
     name: "",
     email: "",
     role: "engineer",
-    status: "offline",
+   
     password: "", // add this
   });
   const [editing, setEditing] = useState(false);
-
+const [error, setError] = useState<string | null>(null);
+const [showNewPassword, setShowNewPassword] = useState(false);
+const [showEditPassword, setShowEditPassword] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const fetchTeamDetail = async () => {
-    try {
-      const [teamData, usersData] = await Promise.all([
-        apiFetch(`/api/admin/teams/${id}`),
-        apiFetch(`/api/admin/users?team_id=${id}`),
-      ]);
-      setTeam(teamData ?? null);
-      const users: User[] = usersData ?? [];
-      setSupervisors(users.filter((u) => u.role === "supervisor"));
-      setMembers(users.filter((u) => u.role === "engineer"));
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [refreshing, setRefreshing] = useState(false);
+
+const fetchTeamDetail = async (isRefresh = false) => {
+  if (isRefresh) setRefreshing(true);
+  else setLoading(true);
+  try {
+    const [teamData, usersData] = await Promise.all([
+      apiFetch(`/api/admin/teams/${id}`),
+      apiFetch(`/api/admin/users?team_id=${id}`),
+    ]);
+    setTeam(teamData ?? null);
+    const users: User[] = usersData ?? [];
+    setSupervisors(users.filter((u) => u.role === "supervisor"));
+    setMembers(users.filter((u) => u.role === "engineer"));
+  } catch (err) {
+    console.error(err);
+  } finally {
+    setLoading(false);
+    setRefreshing(false);
+  }
+};
 
   useEffect(() => {
-    fetchTeamDetail();
+   fetchTeamDetail(true); // instead of fetchTeamDetail()
   }, [id]);
 
   const handleCreateUser = async () => {
-    if (!newUser.name || !newUser.email || !newUser.password) return;
-    setSaving(true);
-    try {
-      await apiFetch("/api/admin/users", {
-        method: "POST",
-        body: JSON.stringify({ ...newUser, team_id: id }),
-      });
-      setAddModalVisible(false);
-      setNewUser({ name: "", email: "", password: "", role: "engineer" });
-      fetchTeamDetail();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setSaving(false);
-    }
-  };
-  const openEdit = (user: User) => {
-    setEditTarget(user);
-    setEditUser({
-      name: user.name,
-      email: "",
-      role: user.role,
-      status: user.status,
-      password: "", // add this
+  if (!newUser.name || !newUser.email || !newUser.password) {
+    setError("All fields are required");
+    return;
+  }
+  const err = validate(newUser.email, newUser.password);
+  if (err) { setError(err); return; }
+  setSaving(true);
+  try {
+    await apiFetch("/api/admin/users", {
+      method: "POST",
+      body: JSON.stringify({ ...newUser, team_id: id }),
     });
-  };
+    setAddModalVisible(false);
+    setNewUser({ name: "", email: "", password: "", role: "engineer" });
+    setError(null);
+    fetchTeamDetail();
+  } catch (err: any) {
+    setError(err?.message ?? "Something went wrong");
+  } finally {
+    setSaving(false);
+  }
+};
+ const openEdit = async (user: User) => {
+  setError(null);
+  setShowEditPassword(false);
+  setEditTarget(user);
+  setEditUser({ name: user.name, email: "", role: user.role, password: "" });
+  try {
+    const data = await apiFetch(`/api/admin/users/${user.id}`);
+    setEditUser((prev) => ({ ...prev, email: data.email ?? "" }));
+  } catch (err) {
+    console.error(err);
+  }
+};
+const validate = (email: string, password: string, isEdit = false) => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) return "Invalid email address";
+  if (!isEdit && password.length < 5) return "Password must be at least 5 characters";
+  if (isEdit && password && password.length < 5) return "Password must be at least 5 characters";
+  return null;
+};
+ const handleEditUser = async () => {
+  if (!editTarget || !editUser.name) {
+    setError("Name is required");
+    return;
+  }
+  const err = validate(editUser.email, editUser.password, true);
+  if (err) { setError(err); return; }
+  setEditing(true);
+  try {
+    await apiFetch(`/api/admin/users/${editTarget.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name: editUser.name,
+        ...(editUser.email ? { email: editUser.email } : {}),
+        ...(editUser.password ? { password: editUser.password } : {}),
+        role: editUser.role,
 
-  const handleEditUser = async () => {
-    if (!editTarget || !editUser.name) return;
-    setEditing(true);
-    try {
-      await apiFetch(`/api/admin/users/${editTarget.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          name: editUser.name,
-          ...(editUser.email ? { email: editUser.email } : {}),
-          ...(editUser.password ? { password: editUser.password } : {}), // add this
-          role: editUser.role,
-          status: editUser.status,
-        }),
-      });
-      setEditTarget(null);
-      fetchTeamDetail();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setEditing(false);
-    }
-  };
-
+      }),
+    });
+    setEditTarget(null);
+    setError(null);
+    fetchTeamDetail();
+  } catch (err: any) {
+    setError(err?.message ?? "Something went wrong");
+  } finally {
+    setEditing(false);
+  }
+};
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -133,7 +159,7 @@ export default function TeamDetailScreen() {
         method: "DELETE",
       });
       setDeleteTarget(null);
-      fetchTeamDetail();
+     fetchTeamDetail(true); // instead of fetchTeamDetail()
     } catch (err) {
       console.error(err);
     } finally {
@@ -151,7 +177,7 @@ export default function TeamDetailScreen() {
     <TouchableOpacity
       key={user.id}
       style={styles.userCard}
-      onPress={() => router.push(`/(admin)/teams/user/${user.id}`)}
+  
       onLongPress={() => openEdit(user)}
     >
       <View style={styles.userLeft}>
@@ -188,7 +214,16 @@ export default function TeamDetailScreen() {
 
   return (
     <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView contentContainerStyle={styles.scroll}
+        refreshControl={
+    <RefreshControl
+      refreshing={refreshing}
+      onRefresh={() => fetchTeamDetail(true)}
+      colors={["#18B4E8"]}
+      tintColor="#18B4E8"
+    />
+  }
+      >
         <Text style={styles.sectionTitle}>Supervisors</Text>
         {supervisors.length === 0 ? (
           <Text style={styles.empty}>No supervisors in this team</Text>
@@ -208,163 +243,137 @@ export default function TeamDetailScreen() {
         icon="account-plus-outline"
         style={styles.fab}
         color="#fff"
-        onPress={() => setAddModalVisible(true)}
+       onPress={() => {
+  setError(null);
+  setShowNewPassword(false);
+  setNewUser({ name: "", email: "", password: "", role: "engineer" });
+  setAddModalVisible(true);
+}}
       />
 
       <Portal>
         {/* Add User Modal */}
-        <Modal
-          visible={addModalVisible}
-          onDismiss={() => setAddModalVisible(false)}
-          contentContainerStyle={styles.modal}
-        >
-          <Text style={styles.modalTitle}>Add User to {team?.name}</Text>
-          <View style={styles.roleToggle}>
-            {["engineer", "supervisor"].map((r) => (
-              <TouchableOpacity
-                key={r}
-                style={[
-                  styles.roleBtn,
-                  newUser.role === r && styles.roleBtnActive,
-                ]}
-                onPress={() => setNewUser({ ...newUser, role: r })}
-              >
-                <Text
-                  style={[
-                    styles.roleBtnText,
-                    newUser.role === r && styles.roleBtnTextActive,
-                  ]}
-                >
-                  {r === "engineer" ? "Engineer" : "Supervisor"}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <TextInput
-            label="Name"
-            value={newUser.name}
-            onChangeText={(v) => setNewUser({ ...newUser, name: v })}
-            mode="outlined"
-            activeOutlineColor="#18B4E8"
-            style={styles.input}
-          />
-          <TextInput
-            label="Email"
-            value={newUser.email}
-            onChangeText={(v) => setNewUser({ ...newUser, email: v })}
-            mode="outlined"
-            activeOutlineColor="#18B4E8"
-            style={styles.input}
-            keyboardType="email-address"
-            autoCapitalize="none"
-          />
-          <TextInput
-            label="Password"
-            value={newUser.password}
-            onChangeText={(v) => setNewUser({ ...newUser, password: v })}
-            mode="outlined"
-            activeOutlineColor="#18B4E8"
-            style={styles.input}
-            secureTextEntry
-          />
-          <Button
-            mode="contained"
-            onPress={handleCreateUser}
-            loading={saving}
-            buttonColor="#18B4E8"
-            style={styles.saveBtn}
-          >
-            Add User
-          </Button>
-        </Modal>
+       <Modal
+  visible={addModalVisible}
+  onDismiss={() => { if (!saving) { setAddModalVisible(false); setError(null); } }}
+  contentContainerStyle={styles.modal}
+>
+  <Text style={styles.modalTitle}>Add User to {team?.name}</Text>
+  
+  <TextInput
+    label="Name"
+    value={newUser.name}
+    onChangeText={(v) => { setError(null); setNewUser({ ...newUser, name: v }); }}
+    mode="outlined"
+    activeOutlineColor="#18B4E8"
+    style={styles.input}
+  />
+  <TextInput
+    label="Email"
+    value={newUser.email}
+    onChangeText={(v) => { setError(null); setNewUser({ ...newUser, email: v }); }}
+    mode="outlined"
+    activeOutlineColor="#18B4E8"
+    style={styles.input}
+    keyboardType="email-address"
+    autoCapitalize="none"
+  />
+  <TextInput
+    label="Password"
+    value={newUser.password}
+    onChangeText={(v) => { setError(null); setNewUser({ ...newUser, password: v }); }}
+    mode="outlined"
+    activeOutlineColor="#18B4E8"
+    style={styles.input}
+    secureTextEntry={!showNewPassword}
+    autoCapitalize="none"
+    right={
+      <TextInput.Icon
+        icon={showNewPassword ? "eye-off" : "eye"}
+        onPress={() => setShowNewPassword((p) => !p)}
+      />
+    }
+  />
+  {error && <Text style={styles.errorText}>{error}</Text>}
+  <Button
+    mode="contained"
+    onPress={handleCreateUser}
+    loading={saving}
+    disabled={saving}
+    buttonColor="#18B4E8"
+    style={styles.saveBtn}
+  >
+    Add User
+  </Button>
+</Modal>
 
         {/* Edit User Modal */}
         <Modal
-          visible={!!editTarget}
-          onDismiss={() => setEditTarget(null)}
-          contentContainerStyle={styles.modal}
-        >
-          <Text style={styles.modalTitle}>Edit User</Text>
-          <View style={styles.roleToggle}>
-            {["engineer", "supervisor"].map((r) => (
-              <TouchableOpacity
-                key={r}
-                style={[
-                  styles.roleBtn,
-                  editUser.role === r && styles.roleBtnActive,
-                ]}
-                onPress={() => setEditUser({ ...editUser, role: r })}
-              >
-                <Text
-                  style={[
-                    styles.roleBtnText,
-                    editUser.role === r && styles.roleBtnTextActive,
-                  ]}
-                >
-                  {r === "engineer" ? "Engineer" : "Supervisor"}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <View style={styles.roleToggle}>
-            {["online", "offline", "inactive"].map((s) => (
-              <TouchableOpacity
-                key={s}
-                style={[
-                  styles.roleBtn,
-                  editUser.status === s && styles.roleBtnActive,
-                ]}
-                onPress={() => setEditUser({ ...editUser, status: s })}
-              >
-                <Text
-                  style={[
-                    styles.roleBtnText,
-                    editUser.status === s && styles.roleBtnTextActive,
-                  ]}
-                >
-                  {s.charAt(0).toUpperCase() + s.slice(1)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <TextInput
-            label="Name"
-            value={editUser.name}
-            onChangeText={(v) => setEditUser({ ...editUser, name: v })}
-            mode="outlined"
-            activeOutlineColor="#18B4E8"
-            style={styles.input}
-          />
-          <TextInput
-            label="Email (leave blank to keep current)"
-            value={editUser.email}
-            onChangeText={(v) => setEditUser({ ...editUser, email: v })}
-            mode="outlined"
-            activeOutlineColor="#18B4E8"
-            style={styles.input}
-            keyboardType="email-address"
-            autoCapitalize="none"
-          />
-          <TextInput
-            label="New Password (leave blank to keep current)"
-            value={editUser.password}
-            onChangeText={(v) => setEditUser({ ...editUser, password: v })}
-            mode="outlined"
-            activeOutlineColor="#18B4E8"
-            style={styles.input}
-            secureTextEntry
-            autoCapitalize="none"
-          />
-          <Button
-            mode="contained"
-            onPress={handleEditUser}
-            loading={editing}
-            buttonColor="#18B4E8"
-            style={styles.saveBtn}
-          >
-            Save Changes
-          </Button>
-        </Modal>
+  visible={!!editTarget}
+  onDismiss={() => { if (!editing) { setEditTarget(null); setError(null); } }}
+  contentContainerStyle={styles.modal}
+>
+  <Text style={styles.modalTitle}>Edit User</Text>
+  <View style={styles.roleToggle}>
+    {["engineer", "supervisor"].map((r) => (
+      <TouchableOpacity
+        key={r}
+        style={[styles.roleBtn, editUser.role === r && styles.roleBtnActive]}
+        onPress={() => setEditUser({ ...editUser, role: r })}
+      >
+        <Text style={[styles.roleBtnText, editUser.role === r && styles.roleBtnTextActive]}>
+          {r === "engineer" ? "Engineer" : "Supervisor"}
+        </Text>
+      </TouchableOpacity>
+    ))}
+  </View>
+  
+  <TextInput
+    label="Name"
+    value={editUser.name}
+    onChangeText={(v) => { setError(null); setEditUser({ ...editUser, name: v }); }}
+    mode="outlined"
+    activeOutlineColor="#18B4E8"
+    style={styles.input}
+  />
+  <TextInput
+    label="Email"
+    value={editUser.email}
+    onChangeText={(v) => { setError(null); setEditUser({ ...editUser, email: v }); }}
+    mode="outlined"
+    activeOutlineColor="#18B4E8"
+    style={styles.input}
+    keyboardType="email-address"
+    autoCapitalize="none"
+  />
+  <TextInput
+    label="New Password (leave blank to keep current)"
+    value={editUser.password}
+    onChangeText={(v) => { setError(null); setEditUser({ ...editUser, password: v }); }}
+    mode="outlined"
+    activeOutlineColor="#18B4E8"
+    style={styles.input}
+    secureTextEntry={!showEditPassword}
+    autoCapitalize="none"
+    right={
+      <TextInput.Icon
+        icon={showEditPassword ? "eye-off" : "eye"}
+        onPress={() => setShowEditPassword((p) => !p)}
+      />
+    }
+  />
+  {error && <Text style={styles.errorText}>{error}</Text>}
+  <Button
+    mode="contained"
+    onPress={handleEditUser}
+    loading={editing}
+    disabled={editing}
+    buttonColor="#18B4E8"
+    style={styles.saveBtn}
+  >
+    Save Changes
+  </Button>
+</Modal>
 
         {/* Delete Confirmation Dialog */}
         <Dialog
@@ -469,4 +478,10 @@ const styles = StyleSheet.create({
   dialogTitle: { textAlign: "center", color: "#0f172a", fontWeight: "700" },
   dialogBody: { fontSize: 14, color: "#475569", textAlign: "center" },
   dialogBold: { fontWeight: "700", color: "#0f172a" },
+  errorText: {
+  color: "#e53935",
+  fontSize: 13,
+  marginBottom: 8,
+  textAlign: "center",
+},
 });

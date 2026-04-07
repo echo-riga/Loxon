@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/images/appicon.png",
     "scheme": "worktrace",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "backgroundColor": "#17325E",
     "androidNavigationBar": {

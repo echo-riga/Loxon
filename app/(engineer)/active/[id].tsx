@@ -12,7 +12,7 @@ import {
   Image,
   Modal,
 } from "react-native";
-import { useLocalSearchParams, router, Stack } from "expo-router";
+import { useLocalSearchParams, Stack } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import MapView, { Marker } from "react-native-maps";
 import * as Location from "expo-location";
@@ -23,9 +23,19 @@ import { uploadImage } from "@/lib/uploadImage";
 import { io, Socket } from "socket.io-client";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { API_URL } from "@/lib/config";
+import NetInfo from "@react-native-community/netinfo";
+import {
+  flushOfflineQueue,
+  enqueueOfflineDone,
+  draftKey,
+  OFFLINE_QUEUE_KEY,
+  type QueuedDonePayload,
+} from "@/lib/offlineQueue";
+
 const { width: SCREEN_W } = Dimensions.get("window");
 const SOCKET_URL = API_URL ?? "http://localhost:3000";
 
+// ─── Types ────────────────────────────────────────────────────────────────────
 type TrackingStatus = "ongoing" | "completed" | "verified";
 type Attachment = { id: number; file_url: string; type: string };
 type JobDetail = {
@@ -198,54 +208,139 @@ export default function ActiveJobDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const jobId = Number(id);
 
+  // ─── State ────────────────────────────────────────────────────────────────
   const [job, setJob] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"job" | "form">("job");
-
-  const [liveCoord, setLiveCoord] = useState<{
-    latitude: number;
-    longitude: number;
-  } | null>(null);
-  const locationSub = useRef<Location.LocationSubscription | null>(null);
-  const socketRef = useRef<Socket | null>(null);
-
+  const [liveCoord, setLiveCoord] = useState<{ latitude: number; longitude: number } | null>(null);
   const [showSigCanvas, setShowSigCanvas] = useState(false);
   const [sigUri, setSigUri] = useState<string | null>(null);
   const [uploadingSig, setUploadingSig] = useState(false);
   const [markingDone, setMarkingDone] = useState(false);
   const [ratings, setRatings] = useState<Record<string, number>>({});
+  const [isQueued, setIsQueued] = useState(false);
 
+  // ─── Refs ─────────────────────────────────────────────────────────────────
+  const locationSub = useRef<Location.LocationSubscription | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  // Ref so fetchJob can read sigUri without being in its dep array (avoids infinite loop)
+  const sigUriRef = useRef<string | null>(null);
+
+  // Keep sigUriRef in sync with sigUri state
+  useEffect(() => {
+    sigUriRef.current = sigUri;
+  }, [sigUri]);
+
+  // ─── 1. Load draft from AsyncStorage on mount ─────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(draftKey(jobId));
+        if (raw) {
+          const draft = JSON.parse(raw);
+          if (draft.ratings) setRatings(draft.ratings);
+          if (draft.sigUri !== undefined) setSigUri(draft.sigUri);
+        }
+        const queueRaw = await AsyncStorage.getItem(OFFLINE_QUEUE_KEY);
+        if (queueRaw) {
+          const queue: QueuedDonePayload[] = JSON.parse(queueRaw);
+          if (queue.some((q) => q.jobId === jobId)) setIsQueued(true);
+        }
+      } catch (e) {
+        console.error("draft load error", e);
+      }
+    })();
+  }, [jobId]);
+
+  // ─── 2. Save draft whenever ratings or sigUri changes ────────────────────
+  useEffect(() => {
+    AsyncStorage.setItem(
+      draftKey(jobId),
+      JSON.stringify({ ratings, sigUri })
+    ).catch(() => {});
+  }, [ratings, sigUri, jobId]);
+
+  // ─── 3. fetchJob — defined before any effect that calls it ───────────────
   const fetchJob = useCallback(async () => {
     try {
       const data = await apiFetch(`/api/engineer/jobs/${jobId}`);
       setJob(data);
-      if (data?.signature_url) setSigUri(data.signature_url);
+      // Use ref to avoid stale closure without adding sigUri to deps
+      if (data?.signature_url && !sigUriRef.current) {
+        setSigUri(data.signature_url);
+      }
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [jobId]);
+  }, [jobId]); // sigUri intentionally omitted — read via ref
 
+  // ─── 4. Initial fetch ─────────────────────────────────────────────────────
   useEffect(() => {
     fetchJob();
   }, [fetchJob]);
 
+  // ─── 5. Auto-sync queue + socket reconnect when connection returns ────────
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      if (state.isConnected) {
+        // Reconnect socket if job is still ongoing and socket is not connected
+        if (job?.status === "ongoing" && !socketRef.current?.connected) {
+          AsyncStorage.getItem("worktrace_token").then((token) => {
+            const socket = io(SOCKET_URL, {
+              auth: { token },
+              transports: ["websocket"],
+            });
+            socketRef.current = socket;
+            socket.on("connect", () => socket.emit("join_job", jobId));
+            socket.on("connect_error", (err) =>
+              console.error("socket reconnect error", err)
+            );
+          });
+        }
+
+        flushOfflineQueue().then(() => {
+          AsyncStorage.getItem(OFFLINE_QUEUE_KEY).then((raw) => {
+            if (!raw) {
+              setIsQueued(false);
+              return;
+            }
+            const queue: QueuedDonePayload[] = JSON.parse(raw);
+            const stillQueued = queue.some((q) => q.jobId === jobId);
+            setIsQueued(stillQueued);
+            if (!stillQueued) fetchJob();
+          });
+        });
+      }
+    });
+    return () => unsubscribe();
+  }, [jobId, job?.status, fetchJob]);
+
+  // ─── 6. Location tracking + initial socket setup ─────────────────────────
   useEffect(() => {
     if (!job || job.status !== "ongoing") return;
+
     (async () => {
       try {
-        const token = await AsyncStorage.getItem("worktrace_token");
-        const socket = io(SOCKET_URL, {
-          auth: { token },
-          transports: ["websocket"],
-        });
-        socketRef.current = socket;
-        socket.on("connect", () => socket.emit("join_job", jobId));
-        socket.on("connect_error", (err) => console.error("socket error", err));
+        // Check connectivity before attempting socket connection
+        const netState = await NetInfo.fetch();
 
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== "granted") return;
+
+        if (netState.isConnected) {
+          const token = await AsyncStorage.getItem("worktrace_token");
+          const socket = io(SOCKET_URL, {
+            auth: { token },
+            transports: ["websocket"],
+          });
+          socketRef.current = socket;
+          socket.on("connect", () => socket.emit("join_job", jobId));
+          socket.on("connect_error", (err) =>
+            console.error("socket error", err)
+          );
+        }
 
         locationSub.current = await Location.watchPositionAsync(
           {
@@ -263,23 +358,26 @@ export default function ActiveJobDetailScreen() {
                 longitude,
               });
             } else {
+              // Fallback to REST when socket is unavailable (offline)
               apiFetch(`/api/engineer/jobs/${jobId}/location`, {
                 method: "PATCH",
                 body: JSON.stringify({ latitude, longitude }),
               }).catch(() => {});
             }
-          },
+          }
         );
       } catch (e) {
         console.error("location/socket setup error", e);
       }
     })();
+
     return () => {
       locationSub.current?.remove();
       socketRef.current?.disconnect();
     };
   }, [job?.status, jobId]);
 
+  // ─── Signature helpers ────────────────────────────────────────────────────
   async function pickSignatureImage(source: "gallery" | "camera") {
     try {
       const result =
@@ -294,7 +392,7 @@ export default function ActiveJobDetailScreen() {
             });
       if (!result.canceled && result.assets[0])
         await uploadSignature(result.assets[0].uri);
-    } catch (e) {
+    } catch {
       Alert.alert("Error", "Failed to open image picker.");
     }
   }
@@ -325,12 +423,15 @@ export default function ActiveJobDetailScreen() {
     }).catch(() => {});
   }
 
+  // ─── Mark as Done ─────────────────────────────────────────────────────────
   async function handleMarkDone() {
     const unanswered = SURVEY_FIELDS.filter((f) => !ratings[f.key]);
     if (unanswered.length > 0) {
       Alert.alert(
         "Survey Incomplete",
-        `Please rate all fields before marking as done.\n\nMissing: ${unanswered.map((f) => f.label).join(", ")}`,
+        `Please rate all fields before marking as done.\n\nMissing: ${unanswered
+          .map((f) => f.label)
+          .join(", ")}`
       );
       return;
     }
@@ -345,14 +446,28 @@ export default function ActiveJobDetailScreen() {
           onPress: async () => {
             setMarkingDone(true);
             try {
+              const netState = await NetInfo.fetch();
+              const answers = Object.entries(ratings).map(
+                ([field_key, field_value]) => ({ field_key, field_value })
+              );
+
+              if (!netState.isConnected) {
+                await enqueueOfflineDone({ jobId, answers, signature_url: sigUri });
+                setIsQueued(true);
+                Alert.alert(
+                  "Saved Offline",
+                  "No internet connection. Your survey has been saved and will sync automatically when you're back online.",
+                  [{ text: "OK" }]
+                );
+                return;
+              }
+
               await apiFetch(`/api/engineer/jobs/${jobId}/done`, {
                 method: "PATCH",
-                body: JSON.stringify({
-                  answers: Object.entries(ratings).map(
-                    ([field_key, field_value]) => ({ field_key, field_value }),
-                  ),
-                }),
+                body: JSON.stringify({ answers }),
               });
+              await AsyncStorage.removeItem(draftKey(jobId));
+              setIsQueued(false);
               await fetchJob();
               locationSub.current?.remove();
               socketRef.current?.disconnect();
@@ -363,10 +478,11 @@ export default function ActiveJobDetailScreen() {
             }
           },
         },
-      ],
+      ]
     );
   }
 
+  // ─── Formatters ───────────────────────────────────────────────────────────
   function formatDate(d: string | null) {
     if (!d) return "—";
     try {
@@ -394,6 +510,7 @@ export default function ActiveJobDetailScreen() {
     }
   }
 
+  // ─── Signature renderer ───────────────────────────────────────────────────
   function renderSignature() {
     if (uploadingSig)
       return (
@@ -455,6 +572,7 @@ export default function ActiveJobDetailScreen() {
     );
   }
 
+  // ─── Loading state ────────────────────────────────────────────────────────
   if (loading || !job)
     return (
       <View style={styles.centered}>
@@ -469,22 +587,20 @@ export default function ActiveJobDetailScreen() {
       ? Math.round(
           (new Date(job.date_to).getTime() -
             new Date(job.date_from).getTime()) /
-            (1000 * 60 * 60 * 24),
+            (1000 * 60 * 60 * 24)
         ) + 1
       : null;
 
   const mapCoord =
     liveCoord ??
     (job.latitude && job.longitude
-      ? {
-          latitude: Number(job.latitude),
-          longitude: Number(job.longitude),
-        }
+      ? { latitude: Number(job.latitude), longitude: Number(job.longitude) }
       : null);
 
   const canMarkDone = jobStatus === "ongoing";
   const isVerified = jobStatus === "verified";
 
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <>
       <Stack.Screen
@@ -505,6 +621,16 @@ export default function ActiveJobDetailScreen() {
       )}
 
       <View style={styles.container}>
+        {/* Offline queued banner */}
+        {isQueued && (
+          <View style={styles.offlineBanner}>
+            <MaterialCommunityIcons name="wifi-off" size={16} color="#92400e" />
+            <Text style={styles.offlineBannerText}>
+              Saved offline — will sync when connected
+            </Text>
+          </View>
+        )}
+
         {/* Tabs */}
         <View style={styles.tabBar}>
           <TouchableOpacity
@@ -517,10 +643,7 @@ export default function ActiveJobDetailScreen() {
               color={activeTab === "job" ? "#18B4E8" : "#9ca3af"}
             />
             <Text
-              style={[
-                styles.tabText,
-                activeTab === "job" && styles.tabTextActive,
-              ]}
+              style={[styles.tabText, activeTab === "job" && styles.tabTextActive]}
             >
               Job / Track
             </Text>
@@ -535,10 +658,7 @@ export default function ActiveJobDetailScreen() {
               color={activeTab === "form" ? "#18B4E8" : "#9ca3af"}
             />
             <Text
-              style={[
-                styles.tabText,
-                activeTab === "form" && styles.tabTextActive,
-              ]}
+              style={[styles.tabText, activeTab === "form" && styles.tabTextActive]}
             >
               Form Details
             </Text>
@@ -556,10 +676,7 @@ export default function ActiveJobDetailScreen() {
               <View
                 style={[
                   styles.statusBadge,
-                  {
-                    backgroundColor:
-                      (STATUS_COLORS[jobStatus] ?? "#ccc") + "22",
-                  },
+                  { backgroundColor: (STATUS_COLORS[jobStatus] ?? "#ccc") + "22" },
                 ]}
               >
                 {jobStatus === "ongoing" && (
@@ -609,10 +726,7 @@ export default function ActiveJobDetailScreen() {
                 <View>
                   <Text style={styles.timeLabel}>Ended</Text>
                   <Text
-                    style={[
-                      styles.timeVal,
-                      !job.ended_at && { color: "#d1d5db" },
-                    ]}
+                    style={[styles.timeVal, !job.ended_at && { color: "#d1d5db" }]}
                   >
                     {formatDateTime(job.ended_at)}
                   </Text>
@@ -622,11 +736,7 @@ export default function ActiveJobDetailScreen() {
 
             {/* Map */}
             <View style={styles.sectionHeader}>
-              <MaterialCommunityIcons
-                name="map-marker"
-                size={16}
-                color="#18B4E8"
-              />
+              <MaterialCommunityIcons name="map-marker" size={16} color="#18B4E8" />
               <Text style={styles.sectionTitle}>Live Location</Text>
               {jobStatus === "ongoing" && (
                 <View style={styles.livePill}>
@@ -662,7 +772,7 @@ export default function ActiveJobDetailScreen() {
               </View>
             )}
 
-            {/* Survey + Signature Card */}
+            {/* Survey + Signature */}
             <View style={styles.sectionHeader}>
               <MaterialCommunityIcons
                 name="clipboard-edit-outline"
@@ -698,7 +808,7 @@ export default function ActiveJobDetailScreen() {
                       onChange={(v) =>
                         setRatings((prev) => ({ ...prev, [field.key]: v }))
                       }
-                      disabled={isVerified}
+                      disabled={isVerified || isQueued}
                     />
                   </View>
                 ))}
@@ -714,17 +824,13 @@ export default function ActiveJobDetailScreen() {
                 {renderSignature()}
               </View>
 
-              {!isVerified && (
+              {!isVerified && !isQueued && (
                 <View style={[styles.sigActions, { marginTop: 10 }]}>
                   <TouchableOpacity
                     style={styles.sigBtn}
                     onPress={() => setShowSigCanvas(true)}
                   >
-                    <MaterialCommunityIcons
-                      name="draw"
-                      size={16}
-                      color="#18B4E8"
-                    />
+                    <MaterialCommunityIcons name="draw" size={16} color="#18B4E8" />
                     <Text style={styles.sigBtnText}>Draw</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -772,7 +878,7 @@ export default function ActiveJobDetailScreen() {
             </View>
 
             {/* Mark as Done */}
-            {canMarkDone && (
+            {canMarkDone && !isQueued && (
               <TouchableOpacity
                 style={[styles.doneBtn, markingDone && styles.doneBtnDisabled]}
                 onPress={handleMarkDone}
@@ -851,9 +957,7 @@ export default function ActiveJobDetailScreen() {
                   duration ? `${duration} day${duration !== 1 ? "s" : ""}` : "—"
                 }
               />
-              {!!job.comment && (
-                <InfoRow label="Comment" value={job.comment!} />
-              )}
+              {!!job.comment && <InfoRow label="Comment" value={job.comment!} />}
             </View>
 
             {job.attachments && job.attachments.length > 0 && (
@@ -902,9 +1006,7 @@ function InfoRow({
   return (
     <View style={styles.infoRow}>
       <Text style={styles.infoLabel}>{label}</Text>
-      <Text
-        style={[styles.infoValue, valueColor ? { color: valueColor } : null]}
-      >
+      <Text style={[styles.infoValue, valueColor ? { color: valueColor } : null]}>
         {value}
       </Text>
     </View>
@@ -915,6 +1017,23 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f0f9ff" },
   centered: { flex: 1, alignItems: "center", justifyContent: "center" },
   scrollContent: { padding: 16, gap: 12 },
+
+  offlineBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#fef3c7",
+    borderBottomWidth: 1,
+    borderBottomColor: "#fde68a",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  offlineBannerText: {
+    fontSize: 13,
+    color: "#92400e",
+    fontWeight: "500",
+    flex: 1,
+  },
 
   tabBar: {
     flexDirection: "row",

@@ -82,6 +82,7 @@ type JobDetail = {
   updated_at: string;
   signature_url: string | null;
   photos: { id: number; file_url: string }[];
+    form_photos: { id: number; file_url: string }[]; // add this
   survey_answers: { field_key: string; field_value: string }[];
 };
 
@@ -540,6 +541,29 @@ export default function RecordDetailScreen() {
                   <InfoRow label="Comment" value={job.comment!} />
                 )}
               </View>
+               {/* ADD HERE ↓ */}
+    {job.form_photos?.length > 0 && (
+      <>
+        <View style={styles.sectionHeader}>
+          <MaterialCommunityIcons name="paperclip" size={16} color={BRAND} />
+          <Text style={styles.sectionTitle}>Form Attachments</Text>
+        </View>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.attachRow}
+        >
+          {job.form_photos.map((p) => (
+            <Image
+              key={p.id}
+              source={{ uri: p.file_url }}
+              style={styles.attachThumb}
+              resizeMode="cover"
+            />
+          ))}
+        </ScrollView>
+      </>
+    )}
               <View style={{ height: 40 }} />
             </ScrollView>
           )}

@@ -1,13 +1,40 @@
 import { Tabs, usePathname } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { TouchableOpacity } from "react-native";
+import { TouchableOpacity, Alert } from "react-native";
 import { useAuth } from "@/lib/authContext";
+import NetInfo from "@react-native-community/netinfo";
+import { flushOfflineQueue } from "@/lib/offlineQueue";
 
 export default function EngineerLayout() {
   const { logout } = useAuth();
   const pathname = usePathname();
 
   const isDeep = !/\/(mytask|active|records)$/.test(pathname);
+
+  const handleLogout = async () => {
+    const state = await NetInfo.fetch();
+
+    if (!state.isConnected) {
+      Alert.alert(
+        "No Internet Connection",
+        "You can't log out while offline. Please connect to the internet first.",
+        [{ text: "OK" }]
+      );
+      return;
+    }
+
+    Alert.alert("Log Out", "Are you sure you want to log out?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Log Out",
+        style: "destructive",
+        onPress: async () => {
+          await flushOfflineQueue();
+          logout();
+        },
+      },
+    ]);
+  };
 
   return (
     <Tabs
@@ -19,7 +46,7 @@ export default function EngineerLayout() {
         headerTintColor: "#000",
         headerShadowVisible: true,
         headerRight: () => (
-          <TouchableOpacity onPress={logout} style={{ marginRight: 16 }}>
+          <TouchableOpacity onPress={handleLogout} style={{ marginRight: 16 }}>
             <MaterialCommunityIcons name="logout" size={24} color="#18B4E8" />
           </TouchableOpacity>
         ),
@@ -28,7 +55,7 @@ export default function EngineerLayout() {
       <Tabs.Screen
         name="mytask"
         options={{
-          title: "Pendingss",
+          title: "Pending",
           tabBarIcon: ({ color, size }) => (
             <MaterialCommunityIcons
               name="clipboard-account-outline"

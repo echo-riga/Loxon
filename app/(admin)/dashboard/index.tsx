@@ -6,6 +6,7 @@ import {
   ScrollView,
   ActivityIndicator,
   RefreshControl,
+  TouchableOpacity,
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { apiFetch } from "@/lib/api";
@@ -19,7 +20,12 @@ const STATUS_COLOR: Record<string, string> = {
   completed: "#6B7280",
   verified: "#A855F7",
 };
-
+const BUCKETS = [
+  { label: "Under 3 hrs", color: "#22C55E", test: (h: number) => h < 3 },
+  { label: "3 – 8 hrs",   color: "#18B4E8", test: (h: number) => h >= 3 && h < 8 },
+  { label: "8 – 24 hrs",  color: "#F59E0B", test: (h: number) => h >= 8 && h < 24 },
+  { label: "Over 24 hrs", color: "#EF4444", test: (h: number) => h >= 24 },
+];
 const PRIORITY_COLORS: Record<string, string> = {
   low: "#22c55e",
   medium: "#f59e0b",
@@ -56,12 +62,20 @@ type RecentJob = {
   priority_level: string;
   worker_name: string;
 };
-
+type CompletionEntry = {
+  worker_name: string;
+  title: string;
+  priority_level: string;
+  started_at: string;
+  ended_at: string;
+  hours_taken: string;
+};
 type DashboardData = {
   totals: Totals;
   formsByStatus: FormsByStatus;
   recentForms: RecentForm[];
   recentJobs: RecentJob[];
+    completionStats: CompletionEntry[];   // add this
 };
 
 function formatDateTime(iso: string) {
@@ -99,7 +113,7 @@ export default function AdminDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-
+const [openBucket, setOpenBucket] = useState<string | null>(null);
   const fetchData = useCallback(async () => {
     try {
       const res = await apiFetch("/api/admin/dashboard");
@@ -135,7 +149,16 @@ export default function AdminDashboard() {
       </View>
     );
 
-  const { totals, formsByStatus, recentForms, recentJobs } = data;
+  const { totals, formsByStatus, recentForms, recentJobs, completionStats } = data;
+
+const bucketed = BUCKETS.map((bucket) => ({
+  ...bucket,
+  entries: completionStats.filter((e) =>
+    bucket.test(parseFloat(e.hours_taken))
+  ),
+}));
+
+
 
   return (
     <ScrollView
@@ -351,7 +374,66 @@ export default function AdminDashboard() {
           );
         })
       )}
+{/* Job Completion Time */}
+<View style={styles.sectionHeader}>
+  <MaterialCommunityIcons name="clock-check-outline" size={16} color={BRAND} />
+  <Text style={styles.sectionTitle}>Job Completion Time</Text>
+</View>
 
+{bucketed.map((bucket) => {
+  const isOpen = openBucket === bucket.label;
+  return (
+    <View key={bucket.label} style={styles.bucketCard}>
+      {/* Bucket header — tap to expand */}
+      <TouchableOpacity
+        style={styles.bucketHeader}
+        onPress={() => setOpenBucket(isOpen ? null : bucket.label)}
+        activeOpacity={0.7}
+      >
+        <View style={[styles.bucketDot, { backgroundColor: bucket.color }]} />
+        <Text style={styles.bucketLabel}>{bucket.label}</Text>
+        <View style={[styles.bucketBadge, { backgroundColor: bucket.color + "22" }]}>
+          <Text style={[styles.bucketCount, { color: bucket.color }]}>
+            {bucket.entries.length}
+          </Text>
+        </View>
+        <MaterialCommunityIcons
+          name={isOpen ? "chevron-up" : "chevron-down"}
+          size={18}
+          color="#9ca3af"
+          style={{ marginLeft: "auto" }}
+        />
+      </TouchableOpacity>
+
+      {/* Expanded list */}
+      {isOpen && (
+        <View style={styles.bucketList}>
+          {bucket.entries.length === 0 ? (
+            <Text style={styles.emptyText}>No entries</Text>
+          ) : (
+            bucket.entries.map((e, i) => (
+              <View key={i} style={styles.bucketEntry}>
+                <View style={styles.bucketEntryLeft}>
+                  <Text style={styles.bucketWorker}>{e.worker_name}</Text>
+                  <Text style={styles.bucketJob} numberOfLines={1}>{e.title}</Text>
+                </View>
+                <View style={styles.bucketEntryRight}>
+                  <Text style={[styles.bucketHours, { color: bucket.color }]}>
+                    {parseFloat(e.hours_taken).toFixed(1)}h
+                  </Text>
+                  <View style={[
+                    styles.priorityDot,
+                    { backgroundColor: PRIORITY_COLORS[e.priority_level] }
+                  ]} />
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+      )}
+    </View>
+  );
+})}
       <View style={{ height: 40 }} />
     </ScrollView>
   );
@@ -459,5 +541,58 @@ const styles = StyleSheet.create({
   activityTime: { fontSize: 11, color: "#9ca3af" },
   priorityDot: { width: 6, height: 6, borderRadius: 3 },
   statusPill: { borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
-  statusText: { fontSize: 11, fontWeight: "600" },
+  statusText: { fontSize: 11, fontWeight: "600" },bucketCard: {
+  backgroundColor: "#fff",
+  borderRadius: 12,
+  overflow: "hidden",
+  elevation: 1,
+  shadowColor: "#000",
+  shadowOpacity: 0.04,
+  shadowRadius: 4,
+},
+bucketHeader: {
+  flexDirection: "row",
+  alignItems: "center",
+  padding: 14,
+  gap: 10,
+},
+bucketDot: {
+  width: 10,
+  height: 10,
+  borderRadius: 5,
+},
+bucketLabel: {
+  fontSize: 14,
+  fontWeight: "600",
+  color: "#111827",
+},
+bucketBadge: {
+  borderRadius: 10,
+  paddingHorizontal: 8,
+  paddingVertical: 2,
+},
+bucketCount: {
+  fontSize: 13,
+  fontWeight: "700",
+},
+bucketList: {
+  borderTopWidth: 1,
+  borderTopColor: "#f3f4f6",
+  paddingHorizontal: 14,
+  paddingVertical: 8,
+  gap: 8,
+},
+bucketEntry: {
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+  paddingVertical: 6,
+  borderBottomWidth: 1,
+  borderBottomColor: "#f9fafb",
+},
+bucketEntryLeft: { flex: 1, gap: 2 },
+bucketEntryRight: { flexDirection: "row", alignItems: "center", gap: 8 },
+bucketWorker: { fontSize: 13, fontWeight: "600", color: "#111827" },
+bucketJob: { fontSize: 11, color: "#6b7280" },
+bucketHours: { fontSize: 13, fontWeight: "700" },
 });

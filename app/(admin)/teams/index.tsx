@@ -15,7 +15,7 @@ import { apiFetch } from "../../../lib/api";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
 import { useCallback } from "react";
-
+import { RefreshControl } from "react-native";
 type Team = { id: number; name: string; member_count: number };
 
 export default function TeamsScreen() {
@@ -29,17 +29,21 @@ export default function TeamsScreen() {
   const [deleteTarget, setDeleteTarget] = useState<Team | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const fetchTeams = async () => {
-    try {
-      const data = await apiFetch("/api/admin/teams");
-      setTeams(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+ const [refreshing, setRefreshing] = useState(false);
 
+const fetchTeams = async (isRefresh = false) => {
+  if (isRefresh) setRefreshing(true);
+  else setLoading(true);
+  try {
+    const data = await apiFetch("/api/admin/teams");
+    setTeams(data);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    setLoading(false);
+    setRefreshing(false);
+  }
+};
   useFocusEffect(
     useCallback(() => {
       fetchTeams();
@@ -113,6 +117,14 @@ export default function TeamsScreen() {
         data={teams}
         keyExtractor={(item) => item.id.toString()}
         numColumns={2}
+        refreshControl={
+    <RefreshControl
+      refreshing={refreshing}
+      onRefresh={() => fetchTeams(true)}
+      colors={["#18B4E8"]}
+      tintColor="#18B4E8"
+    />
+  }
         columnWrapperStyle={styles.row}
         contentContainerStyle={styles.list}
         renderItem={({ item }) => (
